@@ -1,0 +1,80 @@
+name: Uppdatera odds
+
+on:
+  schedule:
+    # Var 30:e minut mellan 15 och 22 UTC. Ger ca 480 API-anrop i månaden,
+    # vilket ryms i gratisplanens 500.
+    - cron: '*/30 15-22 * * *'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: false
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Installera beroenden
+        run: pip install requests
+
+      - name: Hämta odds och analysera
+        env:
+          ODDS_API_KEY: ${{ secrets.ODDS_API_KEY }}
+          BANKROLL: ${{ vars.BANKROLL || '10000' }}
+        run: |
+          set -e
+          if [ -z "$ODDS_API_KEY" ]; then
+            echo "Ingen API-nyckel satt — kör på exempeldata."
+            python3 export.py --data data/sample_matches.json --bankroll "$BANKROLL"
+          else
+            python3 fetch_odds.py \
+              --sport soccer_epl \
+              --out data/today.json --hours 36 || echo "Odds-hämtning misslyckades"
+
+            if [ -f data/team_db.json ] && [ -f data/today.json ]; then
+              python3 team_stats.py --matches data/today.json || true
+            fi
+
+            if [ -f data/today.json ]; then
+              python3 export.py --data data/today.json --bankroll "$BANKROLL"
+            else
+              python3 export.py --data data/sample_matches.json --bankroll "$BANKROLL"
+            fi
+          fi
+
+      - name: Stämpla uppdateringstid
+        run: |
+          python3 - <<'PY'
+          import json, pathlib, datetime
+          p = pathlib.Path('app/picks.json')
+          d = json.loads(p.read_text(encoding='utf-8'))
+          d['published_at'] = datetime.datetime.now(datetime.timezone.utc).isoformat(timespec='seconds')
+          p.write_text(json.dumps(d, ensure_ascii=False, indent=2), encoding='utf-8')
+          print('Publicerar', len(d.get('bets', [])), 'spel')
+          PY
+
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: app
+
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@v4
